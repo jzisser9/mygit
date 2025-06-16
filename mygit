@@ -11,23 +11,30 @@ BLUE='\033[1;34m'
 NC='\033[0m' # No Color
 
 # --- HELP DOCUMENTATION ---
-# (Help text is omitted for brevity but is the same as before)
+# We use an associative array to map command names to their help text.
 declare -A HELP_TEXT
-HELP_TEXT[clone]="..."
-HELP_TEXT[help]="..."
-HELP_TEXT[release]="..."
+
+# We use $'...' C-style strings to allow for easy multi-line formatting with \n (newline).
+HELP_TEXT[clone]=$'NAME\n    mygit clone - Clones a repository into a structured directory based on its URL.\n\nSYNOPSIS\n    mygit clone <repo_url>\n\nDESCRIPTION\n    Validates the repository URL, then parses it to extract the organization/user name (the part of the path before the final repository name).\n\n    It creates a directory with that name in the current location, then runs a standard `git clone` inside that new directory.\n\nEXAMPLE\n    Running `mygit clone https://github.com/google/guava` in `~/Repos` will create the directory `~/Repos/google` and clone the repository into it, resulting in `~/Repos/google/guava`.\n\n    This works for both HTTPS and SSH style URLs.'
+
+HELP_TEXT[help]=$'NAME\n    mygit help - Displays help information for mygit commands.\n\nSYNOPSIS\n    mygit help [command]\n\nDESCRIPTION\n    If a [command] is provided, it displays the detailed manual for that command.\n\n    If no command is specified, it lists all available custom `mygit` commands.'
+
+HELP_TEXT[release]=$'NAME\n    mygit release - Creates a new GitHub release with an auto-incremented version.\n\nSYNOPSIS\n    mygit release <version_type>\n\nDESCRIPTION\n    Automates the process of creating a new GitHub release. It requires the GitHub CLI (`gh`) to be installed and authenticated.\n\n    <version_type> must be one of `major`, `minor`, or `patch`.\n\n    The script automatically determines the latest release version, increments it based on the version_type, and prompts for release notes using your default text editor.\n\n    It then creates a new tag and release on GitHub targeting the default branch (main or master).\n\nEXAMPLE\n    `mygit release patch`'
 
 
 # --- HELPER FUNCTIONS for the 'release' command ---
 
 check_gh_dependency() {
     if ! command -v gh &> /dev/null; then
-        echo -e "\033[0;31mError: GitHub CLI ('gh') is not installed...${NC}" >&2
+        echo -e "\033[0;31mError: GitHub CLI ('gh') is not installed, but it is required for the 'release' command.${NC}" >&2
+        echo -e "${BLUE}Please install it from: https://cli.github.com${NC}" >&2
         exit 1
     fi
 }
 
 check_gh_auth() {
+    # The 'gh auth status' command will exit with a non-zero status code if not logged in.
+    # We redirect its output to /dev/null because we only care about the success/failure.
     if ! gh auth status &>/dev/null; then
         echo -e "\033[0;31mError: You are not logged into the GitHub CLI ('gh').${NC}" >&2
         echo -e "${BLUE}Please run 'gh auth login' to authenticate before using the release command.${NC}" >&2
@@ -44,20 +51,37 @@ calculate_next_version() {
     local latest_tag=$1
     local version_type=$2
     local major=0 minor=0 patch=0
+
     if [ -z "$latest_tag" ]; then
+        # No previous releases exist, start from scratch
         case "$version_type" in
             major) major=1 ;;
             minor) minor=1 ;;
             patch) patch=1 ;;
         esac
     else
-        local version_part="${latest_tag#v}"
+        # Parse existing tag (e.g., v1.2.3, 1.2, v3)
+        local version_part="${latest_tag#v}" # Strip leading 'v'
         IFS='.' read -r major minor patch <<< "$version_part"
-        major=${major:-0}; minor=${minor:-0}; patch=${patch:-0}
+
+        # Default missing parts to 0
+        major=${major:-0}
+        minor=${minor:-0}
+        patch=${patch:-0}
+
         case "$version_type" in
-            major) major=$((major + 1)); minor=0; patch=0 ;;
-            minor) minor=$((minor + 1)); patch=0 ;;
-            patch) patch=$((patch + 1)) ;;
+            major)
+                major=$((major + 1))
+                minor=0
+                patch=0
+                ;;
+            minor)
+                minor=$((minor + 1))
+                patch=0
+                ;;
+            patch)
+                patch=$((patch + 1))
+                ;;
         esac
     fi
     echo "v$major.$minor.$patch"
@@ -65,33 +89,58 @@ calculate_next_version() {
 
 get_release_notes() {
     local notes_file
-    notes_file=$(mktemp)
+    notes_file=$(mktemp) # Create a secure temporary file
+
+    # --- All informational messages now print to stderr (>&2) ---
+
     if [ -z "$EDITOR" ]; then
-        echo -e "\033[0;31mError: \$EDITOR not set...${NC}" >&2
-        rm "$notes_file"; exit 1
+        echo -e "\033[0;31mError: The \$EDITOR environment variable is not set.${NC}" >&2
+        echo -e "${BLUE}The 'release' command needs to open a text editor for you to write release notes.${NC}" >&2
+        echo -e "${YELLOW}Please set it to your preferred command-line editor.${NC}" >&2
+        echo -e "\n${BLUE}For example, to use 'nano', run this command:${NC}" >&2
+        echo -e "    export EDITOR=nano" >&2
+        echo -e "\n${BLUE}You can add this line to your ~/.bashrc or ~/.zshrc file to make it permanent.${NC}" >&2
+        rm "$notes_file"
+        exit 1
     fi
-    local editor_cmd=$(echo "$EDITOR" | awk '{print $1}')
+    
+    local editor_cmd
+    editor_cmd=$(echo "$EDITOR" | awk '{print $1}')
+
     if ! command -v "$editor_cmd" &> /dev/null; then
-        echo -e "\033[0;31mError: Editor '$editor_cmd' not found...${NC}" >&2
-        rm "$notes_file"; exit 1
+        echo -e "\033[0;31mError: Your configured editor command ('$editor_cmd') was not found.${NC}" >&2
+        echo -e "${BLUE}Please check that it is installed and in your PATH, or set \$EDITOR to a different one.${NC}" >&2
+        rm "$notes_file"
+        exit 1
     fi
-    echo -e "${BLUE}Opening your editor...${NC}" >&2
-    echo -e "# Write release notes here..." > "$notes_file"
+    
+    echo -e "${BLUE}Opening your editor ('$EDITOR') for you to write release notes. Save and close the file when you are done.${NC}" >&2
+    
+    # --- The editor command runs as normal ---
+    echo -e "# Write your release notes here.\n# Lines starting with # will be ignored." > "$notes_file"
     $EDITOR "$notes_file"
+    
     grep -v '^#' "$notes_file" > "${notes_file}.tmp" && mv "${notes_file}.tmp" "$notes_file"
+    
+    # --- This is the ONLY thing sent to stdout, and is the function's return value ---
     echo "$notes_file"
 }
 
-# --- THIS FUNCTION IS UPDATED ---
 determine_release_branch() {
     echo -e "${BLUE}Querying GitHub API for the default branch...${NC}" >&2
+    
     local default_branch
     # Be explicit about which repo we are viewing by passing its remote URL.
     default_branch=$(gh repo view "$(git remote get-url origin)" --json defaultBranchRef --jq .defaultBranchRef.name)
+    
+    # Error handling in case the gh command fails
     if [ -z "$default_branch" ]; then
         echo -e "\033[0;31mError: Could not determine default branch from the GitHub API.${NC}" >&2
+        echo -e "${YELLOW}Please ensure this is a valid GitHub repository and you have network access.${NC}" >&2
         exit 1
     fi
+    
+    # This is the function's return value
     echo "$default_branch"
 }
 
@@ -106,7 +155,8 @@ case "$COMMAND" in
     VERSION_TYPE=$2
 
     if [[ "$VERSION_TYPE" != "major" && "$VERSION_TYPE" != "minor" && "$VERSION_TYPE" != "patch" ]]; then
-        echo -e "\033[0;31mError: Invalid version type...${NC}" >&2
+        echo -e "\033[0;31mError: Invalid version type '$VERSION_TYPE'.${NC}" >&2
+        echo -e "${BLUE}Usage: mygit release [major|minor|patch]${NC}" >&2
         exit 1
     fi
 
@@ -116,10 +166,9 @@ case "$COMMAND" in
     TARGET_BRANCH=$(determine_release_branch)
     echo -e "${BLUE}Release will be created from branch: ${YELLOW}$TARGET_BRANCH${NC}" >&2
     
-    # --- THIS COMMAND IS UPDATED ---
     echo -e "\n${YELLOW}Step 2: Calculating next version...${NC}" >&2
     LATEST_TAG=$(get_latest_release_tag)
-    # ... The rest of the script is the same ...
+
     if [ -z "$LATEST_TAG" ]; then
         echo -e "${BLUE}No previous releases found. Creating initial release.${NC}" >&2
     else
@@ -137,7 +186,6 @@ case "$COMMAND" in
     fi
     echo -e "${BLUE}Release notes captured.${NC}" >&2
     
-    # --- THIS COMMAND IS UPDATED ---
     echo -e "\n${YELLOW}Step 4: Creating release on GitHub...${NC}" >&2
     echo -e "${BLUE}This will create tag '${GREEN}$NEW_VERSION${BLUE}' and push it to the remote.${NC}" >&2
     read -p "Are you sure you want to continue? (y/N) " confirm
@@ -159,11 +207,72 @@ case "$COMMAND" in
     ;;
 
   clone)
-    # ... full clone code ...
+    echo "Running custom 'mygit clone' command..."
+    REPO_URL=$2
+    if [ -z "$REPO_URL" ]; then
+      echo "Error: You must provide a repository URL." >&2
+      exit 1
+    fi
+
+    echo "Verifying repository..."
+    if ! git ls-remote "$REPO_URL" &> /dev/null; then
+        echo "Error: Repository '$REPO_URL' is not a valid or accessible git repository." >&2
+        exit 1
+    fi
+    echo "Repository is valid."
+
+    ORG_FOLDER=$(echo "$REPO_URL" | sed 's/:/\//' | sed -E 's|.*/([^/]+)/[^/]+$|\1|')
+    if [[ "$ORG_FOLDER" == "http"* || "$ORG_FOLDER" == "git@"* || -z "$ORG_FOLDER" ]]; then
+        echo "Error: Could not parse a valid directory name from the URL." >&2
+        echo "Expected format like: https://host/organization/repository" >&2
+        echo "Or: git@host:organization/repository" >&2
+        exit 1
+    fi
+    echo "Organization/User folder: '$ORG_FOLDER'"
+    mkdir -p "$ORG_FOLDER"
+    if [ $? -ne 0 ]; then
+        echo "Error: Could not create directory '$ORG_FOLDER'." >&2
+        exit 1
+    fi
+    cd "$ORG_FOLDER"
+    if [ $? -ne 0 ]; then
+        echo "Error: Could not change into directory '$ORG_FOLDER'." >&2
+        exit 1
+    fi
+    
+    echo "Cloning '$REPO_URL' into '$(pwd)'..."
+    
+    if git clone "$REPO_URL"; then
+        echo "Successfully cloned repository."
+    else
+        echo "Error: Failed to clone repository." >&2
+        exit 1
+    fi
     ;;
+
   help)
-    # ... full help code ...
+    HELP_CMD=$2
+
+    if [ -z "$HELP_CMD" ]; then
+      echo "Usage: mygit <command> [options]"
+      echo ""
+      echo "These are the available custom 'mygit' commands:"
+      for cmd in "${!HELP_TEXT[@]}"; do
+        echo "    $cmd"
+      done
+      echo ""
+      echo "Use 'mygit help <command>' for more information about a specific command."
+      echo "Any other command will be passed directly to the real git."
+
+    elif [[ -v HELP_TEXT[$HELP_CMD] ]]; then
+      echo -e "${HELP_TEXT[$HELP_CMD]}"
+    
+    else
+      echo "No help topic for '$HELP_CMD'. It may be a standard git command."
+      echo "Try 'git help $CMD' instead."
+    fi
     ;;
+
   *)
     git "$@"
     ;;
