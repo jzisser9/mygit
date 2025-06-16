@@ -1,0 +1,90 @@
+#!/bin/bash
+
+# A wrapper script for Git to add custom functionality.
+
+# --- HELP DOCUMENTATION ---
+# We use an associative array to map command names to their help text.
+# The 'declare -A' command creates an associative array.
+declare -A HELP_TEXT
+
+# We use $'...' C-style strings to allow for easy multi-line formatting with \n (newline).
+HELP_TEXT[clone]=$'NAME\n    mygit clone - Clones a repository into a structured directory based on its URL.\n\nSYNOPSIS\n    mygit clone <repo_url>\n\nDESCRIPTION\n    Parses the given <repo_url> to extract the organization/user name (the part of the path before the final repository name).\n\n    It creates a directory with that name in the current location, then runs a standard `git clone` inside that new directory.\n\nEXAMPLE\n    Running `mygit clone https://github.com/google/guava` in `~/Repos` will create the directory `~/Repos/google` and clone the repository into it, resulting in `~/Repos/google/guava`.\n\n    This works for both HTTPS and SSH style URLs.'
+
+HELP_TEXT[help]=$'NAME\n    mygit help - Displays help information for mygit commands.\n\nSYNOPSIS\n    mygit help [command]\n\nDESCRIPTION\n    If a [command] is provided, it displays the detailed manual for that command.\n\n    If no command is specified, it lists all available custom `mygit` commands.'
+
+
+# The first argument is the command (e.g., "clone", "commit").
+COMMAND=$1
+
+# --- MAIN LOGIC ---
+# Use a case statement to handle custom commands.
+case "$COMMAND" in
+  # If the command is "help", execute our help logic.
+  help)
+    # The command we want help with is the second argument.
+    HELP_CMD=$2
+
+    # If the user just typed "mygit help"
+    if [ -z "$HELP_CMD" ]; then
+      echo "Usage: mygit <command> [options]"
+      echo ""
+      echo "These are the available custom 'mygit' commands:"
+      # Print out all the keys (command names) from our help array.
+      for cmd in "${!HELP_TEXT[@]}"; do
+        echo "    $cmd"
+      done
+      echo ""
+      echo "Use 'mygit help <command>' for more information about a specific command."
+      echo "Any other command will be passed directly to the real git."
+
+    # If we have a help entry for the requested command
+    # The -v flag checks if the key exists in the associative array.
+    elif [[ -v HELP_TEXT[$HELP_CMD] ]]; then
+      # The -e flag tells echo to interpret backslash escapes (like \n).
+      echo -e "${HELP_TEXT[$HELP_CMD]}"
+    
+    # Otherwise, no help is available.
+    else
+      echo "No help topic for '$HELP_CMD'. It may be a standard git command."
+      echo "Try 'git help $HELP_CMD' instead."
+    fi
+    ;;
+
+  # If the command is "clone", execute our custom logic.
+  clone)
+    echo "Running custom 'mygit clone' command..."
+    REPO_URL=$2
+    if [ -z "$REPO_URL" ]; then
+      echo "Error: You must provide a repository URL."
+      echo "Usage: mygit clone <repo_url>"
+      exit 1
+    fi
+    ORG_FOLDER=$(echo "$REPO_URL" | sed 's/:/\//' | sed -E 's|.*/([^/]+)/[^/]+$|\1|')
+    if [[ "$ORG_FOLDER" == "http"* || "$ORG_FOLDER" == "git@"* || -z "$ORG_FOLDER" ]]; then
+        echo "Error: Could not parse a valid directory name from the URL."
+        echo "Expected format like: https://host/organization/repository"
+        echo "Or: git@host:organization/repository"
+        exit 1
+    fi
+    echo "Organization/User folder: '$ORG_FOLDER'"
+    mkdir -p "$ORG_FOLDER"
+    if [ $? -ne 0 ]; then
+        echo "Error: Could not create directory '$ORG_FOLDER'."
+        exit 1
+    fi
+    cd "$ORG_FOLDER"
+    if [ $? -ne 0 ]; then
+        echo "Error: Could not change into directory '$ORG_FOLDER'."
+        exit 1
+    fi
+    echo "Cloning '$REPO_URL' into '$(pwd)'..."
+    git clone "$REPO_URL"
+    echo "Successfully cloned repository."
+    ;;
+
+  # --- FALLBACK ---
+  # For any other command, just pass it directly to git.
+  *)
+    git "$@"
+    ;;
+esac
