@@ -2,9 +2,14 @@
 
 # A wrapper script for Git to add custom functionality.
 
+# --- Global Configuration & Colors ---
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[1;34m'
+NC='\033[0m' # No Color
+
 # --- HELP DOCUMENTATION ---
 # We use an associative array to map command names to their help text.
-# The 'declare -A' command creates an associative array.
 declare -A HELP_TEXT
 
 # We use $'...' C-style strings to allow for easy multi-line formatting with \n (newline).
@@ -12,45 +17,171 @@ HELP_TEXT[clone]=$'NAME\n    mygit clone - Clones a repository into a structured
 
 HELP_TEXT[help]=$'NAME\n    mygit help - Displays help information for mygit commands.\n\nSYNOPSIS\n    mygit help [command]\n\nDESCRIPTION\n    If a [command] is provided, it displays the detailed manual for that command.\n\n    If no command is specified, it lists all available custom `mygit` commands.'
 
+HELP_TEXT[release]=$'NAME\n    mygit release - Creates a new GitHub release with an auto-incremented version.\n\nSYNOPSIS\n    mygit release <version_type>\n\nDESCRIPTION\n    Automates the process of creating a new GitHub release. It requires the GitHub CLI (`gh`) to be installed and authenticated.\n\n    <version_type> must be one of `major`, `minor`, or `patch`.\n\n    The script automatically determines the latest release version, increments it based on the version_type, and prompts for release notes using your default text editor.\n\n    It then creates a new tag and release on GitHub targeting the default branch (main or master).\n\nEXAMPLE\n    `mygit release patch`'
 
-# The first argument is the command (e.g., "clone", "commit").
-COMMAND=$1
+
+# --- HELPER FUNCTIONS for the 'release' command ---
+
+check_gh_dependency() {
+    if ! command -v gh &> /dev/null; then
+        echo -e "\033[0;31mError: GitHub CLI ('gh') is not installed, but it is required for the 'release' command.${NC}"
+        echo -e "${BLUE}Please install it from: https://cli.github.com${NC}"
+        exit 1
+    fi
+}
+
+get_latest_release_tag() {
+    # Uses gh to get the tagName of the latest release. Returns empty if no releases exist.
+    gh release list --limit 1 --json tagName --jq '.[0].tagName' 2>/dev/null
+}
+
+calculate_next_version() {
+    local latest_tag=$1
+    local version_type=$2
+    local major=0 minor=0 patch=0
+
+    if [ -z "$latest_tag" ]; then
+        # No previous releases exist, start from scratch
+        case "$version_type" in
+            major) major=1 ;;
+            minor) minor=1 ;;
+            patch) patch=1 ;;
+        esac
+    else
+        # Parse existing tag (e.g., v1.2.3, 1.2, v3)
+        local version_part="${latest_tag#v}" # Strip leading 'v'
+        IFS='.' read -r major minor patch <<< "$version_part"
+
+        # Default missing parts to 0
+        major=${major:-0}
+        minor=${minor:-0}
+        patch=${patch:-0}
+
+        case "$version_type" in
+            major)
+                major=$((major + 1))
+                minor=0
+                patch=0
+                ;;
+            minor)
+                minor=$((minor + 1))
+                patch=0
+                ;;
+            patch)
+                patch=$((patch + 1))
+                ;;
+        esac
+    fi
+    echo "v$major.$minor.$patch"
+}
+
+get_release_notes() {
+    local notes_file
+    notes_file=$(mktemp) # Create a secure temporary file
+    
+    # Determine the editor, default to nano
+    local editor=${EDITOR:-nano}
+
+    # Check if the chosen editor is installed
+    if ! command -v "$editor" &> /dev/null; then
+        echo -e "\033[0;31mError: Text editor '$editor' not found.${NC}"
+        echo -e "${BLUE}Please install it or set the \$EDITOR environment variable to your preferred editor.${NC}"
+        rm "$notes_file"
+        exit 1
+    fi
+    
+    echo -e "${BLUE}Opening '$editor' for you to write release notes. Save and close the file when you are done.${NC}"
+    # Provide some initial template text
+    echo -e "# Write your release notes here.\n# Lines starting with # will be ignored." > "$notes_file"
+    
+    # Open the editor. The script will pause here until the user closes the editor.
+    "$editor" "$notes_file"
+    
+    # Filter out comment lines before returning the file path
+    grep -v '^#' "$notes_file" > "${notes_file}.tmp" && mv "${notes_file}.tmp" "$notes_file"
+    
+    echo "$notes_file"
+}
+
+determine_release_branch() {
+    # Check remote branches for main or master
+    if git remote show origin | grep -q 'HEAD branch: main'; then
+        echo "main"
+    elif git remote show origin | grep -q 'HEAD branch: master'; then
+        echo "master"
+    else
+        # If unable to determine, prompt the user
+        echo -e "${YELLOW}Could not automatically determine the default branch (main/master).${NC}"
+        read -p "${BLUE}Please enter the name of the branch to release from: ${NC}" branch_name
+        echo "$branch_name"
+    fi
+}
+
 
 # --- MAIN LOGIC ---
-# Use a case statement to handle custom commands.
+COMMAND=$1
 case "$COMMAND" in
-  # If the command is "help", execute our help logic.
-  help)
-    # The command we want help with is the second argument.
-    HELP_CMD=$2
+  release)
+    check_gh_dependency
+    VERSION_TYPE=$2
 
-    # If the user just typed "mygit help"
-    if [ -z "$HELP_CMD" ]; then
-      echo "Usage: mygit <command> [options]"
-      echo ""
-      echo "These are the available custom 'mygit' commands:"
-      # Print out all the keys (command names) from our help array.
-      for cmd in "${!HELP_TEXT[@]}"; do
-        echo "    $cmd"
-      done
-      echo ""
-      echo "Use 'mygit help <command>' for more information about a specific command."
-      echo "Any other command will be passed directly to the real git."
-
-    # If we have a help entry for the requested command
-    # The -v flag checks if the key exists in the associative array.
-    elif [[ -v HELP_TEXT[$HELP_CMD] ]]; then
-      # The -e flag tells echo to interpret backslash escapes (like \n).
-      echo -e "${HELP_TEXT[$HELP_CMD]}"
-    
-    # Otherwise, no help is available.
-    else
-      echo "No help topic for '$HELP_CMD'. It may be a standard git command."
-      echo "Try 'git help $HELP_CMD' instead."
+    # Validate input
+    if [[ "$VERSION_TYPE" != "major" && "$VERSION_TYPE" != "minor" && "$VERSION_TYPE" != "patch" ]]; then
+        echo -e "\033[0;31mError: Invalid version type '$VERSION_TYPE'.${NC}"
+        echo -e "${BLUE}Usage: mygit release [major|minor|patch]${NC}"
+        exit 1
     fi
+
+    echo -e "${GREEN}Starting interactive release process...${NC}"
+
+    # 1. Determine the target branch
+    echo -e "\n${YELLOW}Step 1: Determining release branch...${NC}"
+    TARGET_BRANCH=$(determine_release_branch)
+    if [ -z "$TARGET_BRANCH" ]; then echo -e "\033[0;31mError: Branch name cannot be empty.${NC}"; exit 1; fi
+    echo -e "${BLUE}Release will be created from branch: ${YELLOW}$TARGET_BRANCH${NC}"
+
+    # 2. Calculate the next version tag
+    echo -e "\n${YELLOW}Step 2: Calculating next version...${NC}"
+    LATEST_TAG=$(get_latest_release_tag)
+    if [ -z "$LATEST_TAG" ]; then
+        echo -e "${BLUE}No previous releases found. Creating initial release.${NC}"
+    else
+        echo -e "${BLUE}Latest release found: ${YELLOW}$LATEST_TAG${NC}"
+    fi
+    NEW_VERSION=$(calculate_next_version "$LATEST_TAG" "$VERSION_TYPE")
+    echo -e "${BLUE}New version will be: ${GREEN}$NEW_VERSION${NC}"
+
+    # 3. Get release notes from the user
+    echo -e "\n${YELLOW}Step 3: Gathering release notes...${NC}"
+    NOTES_FILE_PATH=$(get_release_notes)
+    if [ ! -s "$NOTES_FILE_PATH" ]; then
+        echo -e "\033[0;31mError: Release notes are empty. Aborting.${NC}"
+        rm "$NOTES_FILE_PATH"
+        exit 1
+    fi
+    echo -e "${BLUE}Release notes captured.${NC}"
+
+    # 4. Create the release on GitHub
+    echo -e "\n${YELLOW}Step 4: Creating release on GitHub...${NC}"
+    echo -e "${BLUE}This will create tag '${GREEN}$NEW_VERSION${BLUE}' and push it to the remote.${NC}"
+    read -p "Are you sure you want to continue? (y/N) " confirm
+    if [[ "$confirm" != "y" && "$confirm" != "Y" ]]; then
+        echo -e "${YELLOW}Release aborted by user.${NC}"
+        rm "$NOTES_FILE_PATH"
+        exit 0
+    fi
+
+    gh release create "$NEW_VERSION" \
+        --title "$NEW_VERSION" \
+        --notes-file "$NOTES_FILE_PATH" \
+        --target "$TARGET_BRANCH"
+    
+    # Cleanup the temporary notes file
+    rm "$NOTES_FILE_PATH"
+
+    echo -e "\n${GREEN}--- Release '$NEW_VERSION' created successfully! ---${NC}"
     ;;
 
-  # If the command is "clone", execute our custom logic.
   clone)
     echo "Running custom 'mygit clone' command..."
     REPO_URL=$2
@@ -82,8 +213,36 @@ case "$COMMAND" in
     echo "Successfully cloned repository."
     ;;
 
-  # --- FALLBACK ---
-  # For any other command, just pass it directly to git.
+  help)
+    # The command we want help with is the second argument.
+    HELP_CMD=$2
+
+    # If the user just typed "mygit help"
+    if [ -z "$HELP_CMD" ]; then
+      echo "Usage: mygit <command> [options]"
+      echo ""
+      echo "These are the available custom 'mygit' commands:"
+      # Print out all the keys (command names) from our help array.
+      for cmd in "${!HELP_TEXT[@]}"; do
+        echo "    $cmd"
+      done
+      echo ""
+      echo "Use 'mygit help <command>' for more information about a specific command."
+      echo "Any other command will be passed directly to the real git."
+
+    # If we have a help entry for the requested command
+    # The -v flag checks if the key exists in the associative array.
+    elif [[ -v HELP_TEXT[$HELP_CMD] ]]; then
+      # The -e flag tells echo to interpret backslash escapes (like \n).
+      echo -e "${HELP_TEXT[$HELP_CMD]}"
+    
+    # Otherwise, no help is available.
+    else
+      echo "No help topic for '$HELP_CMD'. It may be a standard git command."
+      echo "Try 'git help $HELP_CMD' instead."
+    fi
+    ;;
+
   *)
     git "$@"
     ;;
